@@ -1,0 +1,314 @@
+USE OPTIM_METHODS
+
+EIDAS calculoSens
+
+CONST INTEGER numC = 6				-- numero de restricciones del problema de optimizacion
+CONST INTEGER numU = 10				-- numero de variables de decision
+INTEGER t_inicio = 0
+INTEGER t_simulacion = 350
+INTEGER t_ajuste = 250
+
+FUNCTION INTEGER coste_y_restricciones (IN REAL esnopt_x[], IN INTEGER needF, OUT REAL esnopt_F[], IN INTEGER explicit_derivatives, IN INTEGER needG, OUT REAL esnopt_G[])
+
+	DECLS
+		REAL arr_quad[ numC + 1 ]						-- array de integrales temporales
+		REAL arr_quadsen[ (numC + 1) * numU ]		-- array de sensibilidad de las integrales
+		REAL arr_quadsen_p[ (numC + 1) * numU ]	-- array de la derivada temporal de la sensibilidad de las integrales
+
+	BODY
+		FOR( j IN 1,numC + 1 )
+			arr_quad[ j ] = 0
+		END FOR
+		FOR( j IN 1, (numC + 1) * numU )
+			arr_quadsen[ j ] = 0
+			arr_quadsen_p[ j ] = 0
+		END FOR
+		
+		-- Actualizar las variables de decision a los valores que propone el optimizador	
+		calculoSens.setU("k10_estim", esnopt_x[1])
+		calculoSens.setU("k20_estim", esnopt_x[2])
+		calculoSens.setU("k30_estim", esnopt_x[3])
+		calculoSens.setU("dHrxn1", esnopt_x[4])
+		calculoSens.setU("dHrxn2", esnopt_x[5])
+		calculoSens.setU("dHrxn3", esnopt_x[6])
+		calculoSens.setU("Ea1", esnopt_x[7])
+		calculoSens.setU("Ea2", esnopt_x[8])
+		calculoSens.setU("Ea3", esnopt_x[9])
+		calculoSens.setU("alpha", esnopt_x[10])	
+		
+		SET_INIT_ACTIVE(TRUE)
+		TIME = t_inicio
+		TSTOP = t_ajuste
+		CINT = 0.0833
+		
+		-- Reiniciar el calculo de sensibilidades con los nuevos valores de los parametros	
+		calculoSens.reiniciar()				
+		calculoSens.calculateSens(TSTOP)  				-- calculoSens.getSens( TSTOP, arr_sen, arr_sen_p )
+		calculoSens.getQuad(arr_quad, arr_quadsen)		-- calculo de las cuadraturas y sus sensibilidades
+		calculoSens.getQuadN(arr_quadsen_p, 1)			-- calculo de la derivada de las sensibilidades de las cuadraturas
+
+		--	Introduccion de los gradientes de la funcion de costo y restricciones a SNOPT
+		--	si la funcion es de camino, hay que introducir la derivada parcial de la cuadratura ( arr_quadsen )
+		-- en caso contrario, si la restriccion es de punto final, al usar arr_quadsen_p se usa la derivada parcial del valor de la funcion.
+		IF (explicit_derivatives == 1) THEN
+			FOR(i IN 1,numU)
+				esnopt_G[i] = arr_quadsen[i]		-- derivadas de las 7 F_optim respecto a las 4 variables de decision
+			END FOR
+			
+			FOR(i IN numU+1,(numC+1)*numU)
+				esnopt_G[i] = arr_quadsen[i]
+			END FOR
+
+		END IF
+
+		-- Introduccion de los valores de las funcines a SNOPT
+		--	si la funcion es de camino, hay que introducir la cuadratura ( arr_quad )
+		-- en caso contrario, si la restriccion es de punto final, al usar F_optim se usa el valor de la funcion.
+		esnopt_F[1] = arr_quad[1] --F_optim[1]
+		FOR(i IN 2, numC+1)
+			esnopt_F[i] = arr_quad[i]
+		END FOR
+
+		RETURN 0
+END FUNCTION
+
+-- llamada a la funcion de residuos por parte de IDAS. No se debe modificar
+-- IDAS propone unos valores de las variables y de las derivadas y pide calcular los residuos
+FUNCTION NO_TYPE funcionResiduos( IN REAL tiempo, IN REAL var[], IN REAL der[], IN INTEGER numPar, IN STRING nomPar[], IN REAL par[], OUT REAL res[] )
+	DECLS
+	OBJECTS
+	BODY
+		FOR(i IN 1, numPar)
+			setValueReal(nomPar[i], par[i])
+		END FOR
+
+		FRES_ARGS(tiempo, var, der, res, FALSE)
+
+END FUNCTION
+
+-- llamada a las funciones de cuadraturas por parte de IDAS, para el calculo de sensibilidades
+-- utilizar el vector F_optim que se actualiza al llamar a los residuos
+FUNCTION NO_TYPE funcionQuadraturas( IN REAL tiempo, IN REAL var[], IN REAL der[], IN INTEGER numPar, IN STRING nomPar[], IN REAL par[], OUT REAL quad[] )
+	DECLS
+	OBJECTS
+	BODY
+		FOR(i IN 1,numPar)
+			setValueReal(nomPar[i], par[i])
+		END FOR
+
+		FRES_ARGS(tiempo, var, der, der, FALSE)
+		
+		-- funciones de cuadraturas
+		FOR(i IN 1,7)
+			quad[i] = F_optim[i]
+		END FOR
+
+END FUNCTION
+
+FUNC_PTR<ptrFunRes> ptrRes = funcionResiduos
+FUNC_PTR<ptrFunRes> ptrQuad = funcionQuadraturas
+
+EXPERIMENT estim_VandeVusse ON Param_Estim.partition1 
+
+   DECLS
+	
+		REAL dec_var[numU]      	-- valor inicial de las variables de decision, size numU. Necesario para las llamadas a ESnopt
+		
+	  	REAL xlow[numU]				-- valor inferior de las variables de decision, size numU. Necesario para las llamadas a ESnopt
+   	REAL xupp[numU]				-- valor superior de las variables de decision, size numU. Necesario para las llamadas a ESnopt
+  
+   	REAL Flow[numC + 1]			-- valor inferior de la funcion objetivo y las restricciones, size (numC + funcion de coste). Necesario para las llamadas a ESnopt
+   	REAL Fupp[numC + 1]			-- valor superior de la funcion objetivo y las restricciones, size (numC + funcion de coste). Necesario para las llamadas a ESnopt
+
+		INTEGER calcularSens = 1
+		INTEGER infoESnopt = 0
+		
+   OBJECTS
+	
+		VECTOR_STRING nombresX		-- variable auxiliar para la inicializacion de las sensibilidades
+
+   INIT
+
+   BOUNDS
+
+   BODY
+ 		-- Los datos no se filtraron. Solo se eliminaron outliers.
+		readTableCols1D("Datos_Filtrados.txt", 1, 2, tab_Ca)  	-- Ca
+		readTableCols1D("Datos_Filtrados.txt", 1, 3, tab_Cb)  	-- Cb
+		readTableCols1D("Datos_Filtrados.txt", 1, 4, tab_Cc) 		-- Cc
+		readTableCols1D("Datos_Filtrados.txt", 1, 5, tab_Cd) 		-- Cd	
+		readTableCols1D("Datos_Filtrados.txt", 1, 7, tab_q)   	-- q
+      readTableCols1D("Datos_Filtrados.txt", 1, 8, tab_qc)   	-- qc
+		readTableCols1D("Datos_Filtrados.txt", 1, 9, tab_T)   	-- T
+		readTableCols1D("Datos_Filtrados.txt", 1, 10, tab_T0)   	-- T0
+		readTableCols1D("Datos_Filtrados.txt", 1, 11, tab_Tc)   	-- Tc
+		readTableCols1D("Datos_Filtrados.txt", 1, 12, tab_Tc0)  	-- Tc0
+
+		SET_INIT_ACTIVE(TRUE)
+		EXEC_INIT()	
+		TIME = t_inicio
+
+      DEBUG_LEVEL = 1
+      IMETHOD = IDAS -- default is DASSL, recommended is either IDAS or IDAS_SPARSE  
+      -- Settings for different actions. Valid actions are: SEV_DISABLE, SEV_NONE, SEV_WARNING, SEV_ERROR, SEV_KILLPOINT, SEV_FATAL
+      eSetErrorAction(ERR_BAD_OPER,SEV_KILLPOINT) -- Detect bad numerical operations (eg division by zero), default is SEV_NONE, recommended is SEV_KILLPOINT
+      eSetErrorAction(ERR_NAN_INF, SEV_KILLPOINT) -- Detect NaN or Inf values, default is SEV_NONE, recommended is SEV_KILLPOINT
+      eSetConfig(CFG_FORCE_STOP_CINT,TRUE) -- Force or not to stop the solver each CINT. Sometimes you can speed up the simulation if you select FALSE
+      -- set tolerances and other important inputs
+      REL_ERROR = 1e-06 -- transient solver relative tolerance
+      ABS_ERROR = 1e-06 -- transient solver absolute tolerance
+      TOLERANCE = 1e-06 -- steady solver relative tolerance
+      INIT_INTEG_STEP = -1 -- initial integration step size (-1 means use the solver estimation) 
+      MAX_INTEG_STEP = -1 -- maximum integration step size (-1 means use the solver estimation) 
+      NSTEPS = 1 -- Only for explicit solvers use CINT/NSTEPS as integration step size
+
+		-- Anadir las variables del jacobiano para el calculo de sensibilidades
+		-- NO MODIFICAR, LO REALIZA AUTOMATICAMENTE
+		-- SINTAXIS:
+		-- addX( nombre de la variable, valor inicial de la misma, booleano que indica si la variable es T_DYNAMIC )
+		nombresX = getVariablesWithCategory( T_JACOBIAN_VARS )		
+		FOR( i IN 1,nombresX.size() )
+			calculoSens.addX( nombresX.at(i), getValueReal( nombresX.at(i) ), ( getVarCategory (nombresX.at(i)) == 2 ) )
+		END FOR
+		
+		-- Iniciliazacion del algoritmos de optimizacion
+		-- inicializaciom de las variables de decision, y los limites
+		-- SINTAXIS:
+		-- addU( nombre de la variable, valor inicial de la misma, booleano que indica si el parametro es un valor inicial )
+		calculoSens.addU("k10_estim", k10_estim, FALSE) 
+		calculoSens.addU("k20_estim", k20_estim, FALSE)
+		calculoSens.addU("k30_estim", k30_estim, FALSE) 
+		calculoSens.addU("dHrxn1", dHrxn1, FALSE) 
+		calculoSens.addU("dHrxn2", dHrxn2, FALSE)
+		calculoSens.addU("dHrxn3", dHrxn3, FALSE) 
+		calculoSens.addU("Ea1", Ea1, FALSE)
+		calculoSens.addU("Ea2", Ea2, FALSE) 
+		calculoSens.addU("Ea3", Ea3, FALSE) 
+		calculoSens.addU("alpha", alpha, FALSE)
+
+		-- Inicializacion del algoritmo de integracion y calculo de sensibilidades
+		-- Inicializacion del algoritmos de optimizacion
+		-- SINTAXIS:
+		-- iniciarRes( tiempo inicial desde el que calcular las sensibilidades, puntero a la funcion de residuos definida previamente )
+		-- iniciarQuad( numero de cuadraturas a calcular, puntero al calculo de las funciones de cuadratura )
+		calculoSens.iniciarRes(TIME, ptrRes)
+		calculoSens.iniciarQuad(numC + 1, ptrQuad)
+		
+		-- Configurar la tolerancia en el calculo de sensibilidades (opcional)
+		calculoSens.setTol( 1e-6 )
+		
+		dec_var[1] = k10_estim
+		dec_var[2] = k20_estim
+		dec_var[3] = k30_estim
+		dec_var[4] = dHrxn1
+		dec_var[5] = dHrxn2
+		dec_var[6] = dHrxn3
+		dec_var[7] = Ea1
+		dec_var[8] = Ea2
+		dec_var[9] = Ea3
+		dec_var[10] = alpha
+
+	--  Limites de las variables de decision
+		--  k10
+		xlow[1] = 0.01
+      xupp[1] = 20
+		-- k20
+      xlow[2] = 0.01
+      xupp[2] = 20
+   	-- k30
+		xlow[3] = 0.01
+		xupp[3] = 20
+   	-- dHrx1
+		xlow[4] = -100
+		xupp[4] = -0.1
+   	-- dHrxn2
+		xlow[5] = -100
+		xupp[5] = -0.1
+		--  dHrxn3
+      xlow[6] = -100
+      xupp[6] = -0.1
+		--  Ea1
+      xlow[7] = 40
+      xupp[7] = 100
+   	-- Ea2
+		xlow[8] = 40
+		xupp[8] = 100
+   	-- Ea3
+		xlow[9] = 40
+		xupp[9] = 100
+   	-- alpha
+		xlow[10] = 0.1
+		xupp[10] = 20
+
+		-- inicializacion de los limites de las restricciones y la funcion de coste
+		Flow[1] = -1.0e10
+		Fupp[1] =  1.0e10	
+		FOR (i IN 2,7)
+			Flow[i] = 0
+			Fupp[i] = 0
+		END FOR
+					
+		-- Representacion en el monitor de los valores previos a la optimizacion
+		WRITE ("\n\n\t\t------------------- limits before optimization \n")
+		FOR ( i IN 1,numU )
+				WRITE ("\t\t var_dec[%d]:\t %g \t %g \t %g \n", i, xlow[i], dec_var[i], xupp[i])
+		END FOR
+		FOR ( i IN 1,numC + 1 )
+				WRITE ("\t\t F_optim[%d]:\t %g \t %g \t %g \n", i, Flow[i], F_optim[i], Fupp[i])		
+		END FOR
+		WRITE ("\n\t\t------------------- END of limits  \n\n")
+
+   	--Optimization extern routine call
+		setSilentMode(TRUE)
+		SET_REPORT_ACTIVE("#MONITOR",FALSE)
+
+		esnopt_init (numU, numC)
+		esnopt_set_variables_bounds_and_initial_values (xlow, xupp, dec_var)
+		esnopt_set_constraints_bounds_and_initial_values (Flow, Fupp, F_optim)
+		esnopt_set_cost_function_and_constraints (coste_y_restricciones)
+		esnopt_set_explicit_derivatives ( calcularSens )
+		esnopt_set_function_precision ( 1.0e-5 )
+		esnopt_set_iterations_limit (300) 
+		infoESnopt = esnopt ()
+		
+		-- Final de la optimizacion, obtencion de los resultados para la simulacion.
+		setSilentMode(FALSE)
+		SET_REPORT_ACTIVE("#MONITOR",TRUE)
+		
+		esnopt_print_data ()
+		esnopt_get_variables_values(dec_var)
+		esnopt_free ()
+		RESET()
+		SET_INIT_ACTIVE(TRUE)
+
+		-- Modificacion de los parametros con los nuevos valores obtenidos		
+		k10_estim = dec_var[1]
+		k20_estim = dec_var[2]
+		k30_estim = dec_var[3]
+		dHrxn1 = dec_var[4]
+		dHrxn2 = dec_var[5]
+		dHrxn3 = dec_var[6]
+		Ea1 	 = dec_var[7]
+		Ea2	 = dec_var[8]
+		Ea3	 = dec_var[9]
+		alpha  = dec_var[10]
+		
+		-- Llamada al integrador
+      TIME = 0
+		TSTOP = t_simulacion
+		CINT = 0.0833
+  	   INTEG()
+		
+		-- Representacion en el monitor de los valores posteriores a la optimizacion
+		WRITE ("\n\n\t\t------------------- The optimiser succeed, returned the value: %d. \n", infoESnopt)
+		WRITE ("\n\n\t\t------------------- constraints and decision variables after optimization \n")
+		FOR ( i IN 1,numU )
+			WRITE ("\t\t var_dec[%d]:\t %g \t %g \t %g \n", i, xlow[i], dec_var[i], xupp[i])
+		END FOR
+		WRITE ("\n\n\t\t------------------- cost function and constraints after optimization \n")
+		FOR ( i IN 1,numC + 1 )
+			WRITE ("\t\t F_optim[%d]:\t %g \t %g \t %g \n", i, Flow[i], F_optim[i], Fupp[i])		
+		END FOR
+		WRITE ("\n\t\t------------------- end   \n\n")
+
+END EXPERIMENT
